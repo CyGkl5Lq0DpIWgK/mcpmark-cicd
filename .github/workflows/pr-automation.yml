@@ -1,0 +1,267 @@
+name: Pull Request Automation
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  code-quality:
+    name: code-quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint checks
+        id: eslint
+        run: |
+          npm run lint
+          if [ $? -ne 0 ]; then
+            echo "eslint_failed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run Prettier formatting checks
+        id: prettier
+        run: |
+          npx prettier --check .
+          if [ $? -ne 0 ]; then
+            echo "prettier_failed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post Code Quality Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const eslintFailed = ${{ steps.eslint.outputs.eslint_failed }} === 'true';
+            const prettierFailed = ${{ steps.prettier.outputs.prettier_failed }} === 'true';
+            
+            let commentBody = "## Code Quality Report\n\n";
+            
+            // ESLint Section
+            commentBody += "### ESLint Checks\n";
+            commentBody += eslintFailed 
+              ? "❌ **ESLint found issues in the codebase.** Please fix the linting errors.\n"
+              : "✅ **ESLint checks passed successfully.** No linting issues detected.\n";
+            
+            // Prettier Section
+            commentBody += "\n### Prettier Formatting Checks\n";
+            commentBody += prettierFailed
+              ? "❌ **Prettier found formatting issues.** Please format your code with `npx prettier --write .`.\n"
+              : "✅ **Prettier formatting checks passed.** Code is properly formatted.\n";
+            
+            // Post comment to PR
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: commentBody
+            });
+
+  testing-suite:
+    name: testing-suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run test suite with coverage
+        id: test
+        run: |
+          npm test -- --coverage
+          if [ $? -ne 0 ]; then
+            echo "test_failed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload coverage report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-coverage-report
+          path: ./coverage
+          retention-days: 7
+
+      - name: Post Test Coverage Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const testFailed = ${{ steps.test.outputs.test_failed }} === 'true';
+            
+            let commentBody = "## Test Coverage Report\n\n";
+            
+            commentBody += testFailed
+              ? "❌ **Test suite failed.** Please fix the failing tests.\n"
+              : "✅ **All tests passed successfully.**\n";
+            
+            commentBody += "\n📊 A full test coverage report has been uploaded as an artifact (see the 'Artifacts' section above).\n";
+            
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: commentBody
+            });
+
+  security-scan:
+    name: security-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Dependency vulnerability scan (npm audit)
+        id: npm-audit
+        run: |
+          npm audit --json > npm-audit-report.json
+          if [ $? -eq 1 ]; then
+            echo "vulnerabilities_found=true" >> "$GITHUB_OUTPUT"
+          fi
+          exit 0 # Don't fail job, just report
+
+      - name: Secret scan (Gitleaks)
+        uses: zricethezav/gitleaks-action@v2.2.0
+        id: gitleaks
+        with:
+          args: --path=. --report-format=json --report-path=gitleaks-report.json
+          fail-on-error: false # Don't fail job, just report
+
+      - name: Post Security Scan Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const vulnerabilitiesFound = ${{ steps.npm-audit.outputs.vulnerabilities_found }} === 'true';
+            const secretsFound = ${{ steps.gitleaks.outputs.scan_result }} === 'true';
+            
+            let commentBody = "## Security Scan Report\n\n";
+            
+            // Dependency Vulnerabilities
+            commentBody += "### Dependencies Vulnerabilities\n";
+            commentBody += vulnerabilitiesFound
+              ? "⚠️ **Vulnerabilities detected in dependencies.** See the `npm-audit-report.json` artifact for details.\n"
+              : "✅ **No vulnerabilities found in dependencies.**\n";
+            
+            // Secret Scan
+            commentBody += "\n### Secret Scan\n";
+            commentBody += secretsFound
+              ? "❌ **Potential secrets detected in code changes.** See the `gitleaks-report.json` artifact for details.\n"
+              : "✅ **No secrets found in code changes.**\n";
+            
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: commentBody
+            });
+
+      - name: Upload security scan artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-scan-reports
+          path: |
+            ./npm-audit-report.json
+            ./gitleaks-report.json
+          retention-days: 7
+
+  build-validation:
+    name: build-validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        id: build
+        run: |
+          npm run build
+          if [ $? -ne 0 ]; then
+            echo "build_failed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate build output
+        id: validate-build
+        if: steps.build.outputs.build_failed != 'true'
+        run: |
+          # Check common Node.js build directories
+          BUILD_DIRS=("dist" "build" "out")
+          BUILD_VALID="false"
+          
+          for dir in "${BUILD_DIRS[@]}"; do
+            if [ -d "$dir" ] && [ "$(ls -A "$dir")" ]; then
+              BUILD_VALID="true"
+              break
+            fi
+          done
+          
+          echo "build_valid=$BUILD_VALID" >> "$GITHUB_OUTPUT"
+
+      - name: Upload deployment preview artifacts
+        uses: actions/upload-artifact@v4
+        if: steps.build.outputs.build_failed != 'true'
+        with:
+          name: deployment-preview
+          path: |
+            dist/
+            build/
+            out/
+          retention-days: 7
+
+      - name: Post Build Validation Status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const buildFailed = ${{ steps.build.outputs.build_failed }} === 'true';
+            const buildValid = ${{ steps.validate-build.outputs.build_valid }} === 'true';
+            
+            let commentBody = "## Build Validation\n\n";
+            
+            if (buildFailed) {
+              commentBody += "❌ **Application build failed.** Please fix build errors and re-run.\n";
+            } else {
+              commentBody += "✅ **Application built successfully.**\n";
+              
+              commentBody += buildValid
+                ? "✅ **Build output directory validated (contains files).**\n"
+                : "⚠️ **Build output directory not found or empty.** Please verify your build configuration.\n";
+              
+              commentBody += "\n📦 Deployment preview artifacts have been uploaded (see 'Artifacts' section).\n";
+            }
+            
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: commentBody
+            });
